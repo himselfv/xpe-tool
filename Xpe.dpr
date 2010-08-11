@@ -12,8 +12,7 @@ program Xpe;
 *)
 
 uses
-  SysUtils, ActiveX, AdoInt, TntClasses, Variants, Windows,
-  CodepageUtils, WideStrUtils,
+  SysUtils, ActiveX, AdoInt, TntClasses, Variants, Windows, WideStrUtils,
   ResourceList in 'ResourceList.pas',
   XpeConsts in 'XpeConsts.pas';
 
@@ -627,6 +626,6 @@ begin
       PrintUsage;
     end;
     on E:Exception do
-      Writeln(E.Classname, ': ', WinToOEM(E.Message));
+      Writeln(E.Classname, ': ', E.Message);
   end;
 end.
