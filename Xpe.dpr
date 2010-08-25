@@ -223,7 +223,7 @@ begin
 end;
 
 
-//Reads ExtendedResource value from recordset according to ExtendedResourceFormat.
+//Reads ExtendedResource value from recordset according to ExtendedResourceFormat
 function readFormat(rs: _Recordset; format: integer): OleVariant;
 begin
   case format of
