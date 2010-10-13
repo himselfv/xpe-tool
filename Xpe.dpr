@@ -14,7 +14,8 @@ program Xpe;
 uses
   SysUtils, ActiveX, AdoInt, TntClasses, Variants, Windows, WideStrUtils,
   ResourceList in 'ResourceList.pas',
-  XpeConsts in 'XpeConsts.pas';
+  XpeConsts in 'XpeConsts.pas',
+  DirIdResolver in 'DirIdResolver.pas';
 
 type
   EBadUsage = class(Exception);
@@ -32,7 +33,7 @@ type
   end;
 
 const
-  COMMANDS: array[0..5] of TCommandInfo = (
+  COMMANDS: array[0..7] of TCommandInfo = (
     ( cmd: 'help'; p: '[command]';
       desc: 'Prints help.' ),
     ( cmd: 'find'; p: '<part of component name>';
@@ -41,8 +42,14 @@ const
       desc: 'Prints basic component info.' ),
     ( cmd: 'deps'; p: '<component id>';
       desc: 'Prints component dependencies.' ),
+
     ( cmd: 'files'; p: '<component id>';
       desc: 'Prints the list of files included in component.' ),
+    ( cmd: 'repositories'; p: '<component id>';
+      desc: 'Prints the list of repositories which may contain component files.' ),
+    ( cmd: 'collect-files'; p: '<component id> <dir>';
+      desc: 'Gathers the files contained in the component into the specified directory.' ),
+
     ( cmd: 'registry-export'; p: '<component id>';
       desc: 'Prints registry export file (.reg) of component registry entries.' )
   );
@@ -101,7 +108,7 @@ begin
   FreeAndNil(Config);
 end;
 
-
+////////////////////////////////////////////////////////////////////////////////
 
 function getComponentId(ParamId: integer): integer;
 begin
@@ -155,6 +162,8 @@ procedure writelnField(rs: _Recordset; FieldName: string);
 begin
   writelnPair(FieldName, str(rs.Fields[FieldName].Value));
 end;
+
+////////////////////////////////////////////////////////////////////////////////
 
 //MAIN: find <part of name>
 procedure ListComponents(PartOfName: WideString);
@@ -222,6 +231,7 @@ begin
   writelnList(rs);
 end;
 
+////////////////////////////////////////////////////////////////////////////////
 
 //Reads ExtendedResource value from recordset according to ExtendedResourceFormat
 function readFormat(rs: _Recordset; format: integer): OleVariant;
@@ -299,20 +309,27 @@ begin
   end;
 end;
 
-//MAIN: files <id>
-procedure FileList(ComponentId: integer);
+//Returns file resource list. Don't forget to destroy.
+function GetFileResources(ComponentId: integer): TResourceList;
 var rs: _Recordset;
   RecordsAffected: OleVariant;
-  Resources: TResourceList;
+begin
+  rs := conn.Execute('SELECT * FROM ExtendedProperties '
+    +'WHERE ResourceTypeId='+IntToStr(RESOURCETYPE_FILE)+' '
+    +'AND OwnerId='+IntToStr(ComponentId)+' '
+    +'ORDER BY ResourceId ', RecordsAffected, 0);
+  Result := parseFileResources(rs);
+end;
+
+
+//MAIN: files <id>
+procedure FileList(ComponentId: integer);
+var Resources: TResourceList;
   Res: TFileResource;
   i: integer;
   Src, Dst: WideString;
 begin
-  rs := conn.Execute('SELECT * FROM ExtendedProperties WHERE '
-    +'ResourceTypeId='+IntToStr(RESOURCETYPE_FILE)+' AND ' //file
-    +'OwnerId='+IntToStr(ComponentId)+' '
-    +'ORDER BY ResourceId ', RecordsAffected, 0);
-  Resources := parseFileResources(rs);
+  Resources := GetFileResources(ComponentId);
   try
     for i := 0 to Resources.Count - 1 do begin
       Res := TFileResource(Resources.Items[i]);
@@ -334,6 +351,283 @@ begin
   end;
 end;
 
+////////////////////////////////////////////////////////////////////////////////
+/// Repositories
+
+(*
+  Repo list is stored in RepositoryObjects. Each repo may have fallback
+  repositories set through ExtendedProperties with:
+    OwnerClass=1
+    OwnerId=RepositoryObjects.RepositoryID
+    Name='cmiFallbackRepositoryVSGUID'
+
+  Repository sets are stored in GroupObjects with GroupClass=4. Their
+  GroupVSGUIDS may be used everywhere where RepositoryVSGUID is expected,
+  but they can't have fallbacks and they can't contain another sets.
+
+  Each component may reference up to one Repository or Repository set through
+  it's RepositoryVSGUID property.
+*)
+
+type
+  TPathList = array of WideString;
+  TRepositoryList = array of string;
+
+//Might be empty or {0000...0000}
+function GetComponentRepository(ComponentId: integer): string;
+var rs: _Recordset;
+  RecordsAffected: OleVariant;
+begin
+  rs := conn.Execute('SELECT RepositoryVSGUID '
+    +'FROM ComponentObjects '
+    +'WHERE ComponentID='+IntToStr(ComponentID),
+    RecordsAffected, 0);
+  if rs.EOF then
+    raise Exception.Create('Database error: Component not found.');
+  Result := rs.Fields[0].Value;
+end;
+
+//Returns a list of fallback repositories for this one.
+function GetFallbackRepositories(RepositoryGuid: string): TRepositoryList;
+var rs: _Recordset;
+  RecordsAffected: OleVariant;
+begin
+  rs := conn.Execute('SELECT GUIDValue '
+    +'FROM ExtendedProperties, RepositoryObjects '
+    +'WHERE ExtendedProperties.OwnerClass=1 ' //Repository
+    +'AND ExtendedProperties.OwnerID=RepositoryObjects.RepositoryID '
+    +'AND RepositoryObjects.RepositoryVSGUID='''+RepositoryGuid+''' '
+    +'AND ExtendedProperties.Name=''cmiFallbackRepositoryVSGUID''',
+    RecordsAffected, 0);
+  SetLength(Result, 0);
+  while not rs.EOF do begin
+    SetLength(Result, Length(Result)+1);
+    Result[Length(Result)-1] := rs.Fields[0].Value;
+    rs.MoveNext;
+  end;
+end;
+
+//It's legitimate to call this function for a simple Repository (not set).
+//Empty array will be returned
+function GetRepositorySetContents(RepositorySetGuid: string): TRepositoryList;
+var rs: _Recordset;
+  RecordsAffected: OleVariant;
+begin
+  rs := conn.Execute('SELECT RepositoryObjects.RepositoryVSGUID '
+    +'FROM GroupMembership, RepositoryObjects '
+    +'WHERE GroupMembership.MemberClass=1 ' //Repository
+    +'AND GroupMembership.GroupVSGUID='''+RepositorySetGuid+''' '
+    +'AND RepositoryObjects.RepositoryID=GroupMembership.MemberID',
+    RecordsAffected, 0);
+  SetLength(Result, 0);
+  while not rs.EOF do begin
+    SetLength(Result, Length(Result)+1);
+    Result[Length(Result)-1] := rs.Fields[0].Value;
+    rs.MoveNext;
+  end;
+end;
+
+//Adds missing elements from set B to set A.
+procedure MergeRepositoryList(var a: TRepositoryList; const b: TRepositoryList);
+var i, j: integer;
+  Found: boolean;
+begin
+  for i := 0 to Length(b) - 1 do begin
+    Found := false;
+    for j := 0 to Length(a) - 1 do
+      if SameText(a[j], b[i]) then begin
+        Found := true;
+        break;
+      end;
+    if not Found then begin
+      SetLength(a, Length(a)+1);
+      a[Length(a)-1] := b[i];
+    end;
+  end;
+end;
+
+//Replaces all the repository sets in the list with their contents.
+procedure ExpandRepositorySets(var Repos: TRepositoryList);
+var i: integer;
+begin
+ //We don't parse newly-added elements
+  for i := Length(Repos) - 1 downto 0 do
+    MergeRepositoryList(Repos, GetRepositorySetContents(Repos[i]));
+end;
+
+//Returns repository path for a repository. Sets are not supported.
+function GetRepositoryPath(RepositoryGuid: string): WideString;
+var rs: _Recordset;
+  RecordsAffected: OleVariant;
+begin
+  rs := conn.Execute('SELECT SrcPath '
+    +'FROM RepositoryObjects '
+    +'WHERE RepositoryVSGUID='''+RepositoryGuid+'''',
+    RecordsAffected, 0);
+  if rs.EOF then begin
+    Result := '';
+    exit;
+  end;
+  Result := rs.Fields[0].Value;
+end;
+
+//Builds a list of main and fallback repositories for a component.
+function GetComponentRepositoryList(ComponentId: integer): TRepositoryList;
+var repo: string;
+  i: integer;
+  fb: TRepositoryList;
+begin
+  repo := GetComponentRepository(ComponentID);
+  if repo='' then begin
+    SetLength(Result, 0);
+    exit;
+  end;
+
+  SetLength(Result, 1);
+  Result[0] := repo;
+  ExpandRepositorySets(Result);
+
+  i := 0;
+  while i < Length(Result) do begin
+    fb := GetFallbackRepositories(Result[i]);
+    ExpandRepositorySets(fb);
+    MergeRepositoryList(Result, fb);
+    Inc(i);
+  end;
+end;
+
+//Builds a list of possible file sources, by enumerating through all the fallback
+//repositories and checking which ones are, ehm, resolvable to paths.
+function GetComponentRepositoryPaths(ComponentId: integer): TPathList;
+var Repos: TRepositoryList;
+  i: integer;
+  path: WideString;
+begin
+  SetLength(Result, 0);
+  Repos := GetComponentRepositoryList(ComponentId);
+  for i := 0 to Length(Repos) - 1 do begin
+    path := GetRepositoryPath(Repos[i]);
+    if path<>'' then begin
+      SetLength(Result, Length(Result)+1);
+      Result[Length(Result)-1] := path;
+    end;
+  end;
+end;
+
+procedure PrintRepositoryList(RepoDirs: TPathList);
+var i: integer;
+begin
+  for i := 0 to Length(RepoDirs) - 1 do
+    writeln('  '+RepoDirs[i]);
+end;
+
+procedure PrintPathList(RepoDirs: TPathList);
+var i: integer;
+begin
+  for i := 0 to Length(RepoDirs) - 1 do
+    writeln('  '+RepoDirs[i]);
+end;
+
+//MAIN: repositories <id>
+procedure RepositoryList(ComponentId: integer);
+var Repos: TRepositoryList;
+  i: integer;
+begin
+  Repos := GetComponentRepositoryList(ComponentId);
+  for i := 0 to Length(Repos) - 1 do
+    writeln(Repos[i]+#09+GetRepositoryPath(Repos[i]));
+end;
+
+////////////////////////////////////////////////////////////////////////////////
+
+
+//Looks through a list of repositories checking for the first one to contain
+//the requested file. Returns full path to the file or '' if not found.
+//FileName should contain SourcePath.
+function FindFilePath(FileName: string; RepoDirs: TPathList): string;
+var i: integer;
+begin
+  Result := '';
+  for i := 0 to Length(RepoDirs) - 1 do
+    if FileExists(RepoDirs[i]+'\'+FileName) then begin
+      Result := RepoDirs[i]+'\'+FileName;
+      break;
+    end;
+end;
+
+//MAIN: collect-files <id> <dir>
+procedure CollectFiles(ComponentId: integer; Dir: WideString);
+var Dirs: TDirIdResolver;
+  Resources: TResourceList;
+  Res: TFileResource;
+  SrcPath, SrcName: WideString;
+  TargetPath: WideString;
+
+  RepoDirs: TPathList;
+  i: integer;
+begin
+  Dirs := TDirIdResolver.Create;
+  try
+    Dirs.BootDrive := Dir + '\Boot';
+    Dirs.SystemDrive := Dir + '\System';
+    Dirs.Windows := Dir + '\Windows';
+    Dirs.ProgramFiles := Dir + '\Program Files';
+    Dirs.DocumentsAndSettings := Dir + '\Documents and Settings';
+
+    Resources := GetFileResources(ComponentId);
+    try
+      if Resources.Count <= 0 then exit;
+
+      RepoDirs := GetComponentRepositoryPaths(ComponentId);
+      if Length(RepoDirs)<=0 then
+        raise Exception.Create('Component repository list contains no valid '
+          +'repositories, while the list of files is not empty.');
+      writeln('Looking in repositories:');
+      PrintPathList(RepoDirs);
+      writeln('');
+      writeln('Copying files:');
+
+      for i := 0 to Resources.Count - 1 do begin
+        Res := Resources.Items[i] as TFileResource;
+
+       //Souce
+        if Res.SrcPath <> '' then
+          SrcName := '\'+Res.SrcPath
+        else
+          SrcName := '';
+        if Res.SrcName <> '' then
+          SrcName := SrcName + '\' + Res.SrcName
+        else
+          SrcName := SrcName + '\' + Res.DstName;
+        SrcPath := FindFilePath(SrcName, RepoDirs);
+        if SrcPath='' then
+          raise Exception.Create('Cannot find file '+SrcName+' in any of the '
+            +'valid repositories associated with the component.');
+
+       //Target
+        TargetPath := Dirs.ResolveStr(Res.DstPath);
+        ForceDirectories(TargetPath+'\');
+        writeln('  '+TargetPath+'\'+Res.DstName);
+
+        if not CopyFileW(
+          PWideChar(SrcPath),
+          PWideChar(TargetPath+'\'+Res.DstName),
+          {FailIfExists=}false) then
+          raise Exception.Create('Cannot copy '+SrcPath+' to '+TargetPath+': '
+            +IntToStr(GetLastError)+'.');
+      end;
+
+    finally
+      FreeAndNil(Resources);
+    end;
+
+  finally
+    FreeAndNil(Dirs);
+  end;
+end;
+
+
+////////////////////////////////////////////////////////////////////////////////
 
 //Parses ExtendedResource list containing Registry Resources turning it into a Registry Resource List
 function parseRegistryResources(rs: _Recordset): TResourceList;
@@ -388,6 +682,17 @@ begin
     FreeAndNil(Result);
     raise;
   end;
+end;
+
+function GetRegistryResources(ComponentId: integer): TResourceList;
+var rs: _Recordset;
+  RecordsAffected: OleVariant;
+begin
+  rs := conn.Execute('SELECT * FROM ExtendedProperties WHERE '
+    +'ResourceTypeId='+IntToStr(RESOURCETYPE_REGISTRY)+' AND ' //registry
+    +'OwnerId='+IntToStr(ComponentId)+' '
+    +'ORDER BY ResourceId ', RecordsAffected, 0);
+  Result := parseRegistryResources(rs);
 end;
 
 
@@ -468,20 +773,14 @@ begin
 end;
 
 procedure RegistryExport(ComponentId: integer);
-var rs: _Recordset;
-  RecordsAffected: OleVariant;
-  Resources: TResourceList;
+var Resources: TResourceList;
   Res: TRegistryResource;
   i: integer;
   LastKey: WideString;
   ValueName: WideString;
   ValueStr: WideString;
 begin
-  rs := conn.Execute('SELECT * FROM ExtendedProperties WHERE '
-    +'ResourceTypeId='+IntToStr(RESOURCETYPE_REGISTRY)+' AND ' //registry
-    +'OwnerId='+IntToStr(ComponentId)+' '
-    +'ORDER BY ResourceId ', RecordsAffected, 0);
-  Resources := parseRegistryResources(rs);
+  Resources := GetRegistryResources(ComponentId);
   try
     SortRegistryResources(Resources);
     writeln('Windows Registry Editor Version 5.00');
@@ -612,6 +911,12 @@ begin
     end else
     if SameText(cmd, 'files') then begin
       FileList(getComponentId(2));
+    end else
+    if SameText(cmd, 'repositories') then begin
+      RepositoryList(getComponentId(2));
+    end else
+    if SameText(cmd, 'collect-files') then begin
+      CollectFiles(getComponentId(2), ParamStr(3));
     end else
     if SameText(cmd, 'registry-export') then begin
       RegistryExport(getComponentId(2));
