@@ -43,14 +43,14 @@ const
     ( cmd: 'deps'; p: '<component id>';
       desc: 'Prints component dependencies.' ),
 
-    ( cmd: 'files'; p: '<component id>';
+    ( cmd: 'files'; p: '<component id> [component-id] ...';
       desc: 'Prints the list of files included in component.' ),
     ( cmd: 'repositories'; p: '<component id>';
       desc: 'Prints the list of repositories which may contain component files.' ),
     ( cmd: 'collect-files'; p: '<component id> <dir>';
       desc: 'Gathers the files contained in the component into the specified directory.' ),
 
-    ( cmd: 'registry-export'; p: '<component id>';
+    ( cmd: 'registry-export'; p: '<component id> [component id] ...';
       desc: 'Prints registry export file (.reg) of component registry entries.' )
   );
 
@@ -88,6 +88,11 @@ begin
 end;
 
 
+type
+  TComponentId = integer;
+  TComponentIds = array of integer;
+
+
 var
   Config: TTntStringList;
   conn: _Connection;
@@ -115,6 +120,21 @@ begin
   if ParamCount<ParamId then BadUsage('ComponentId missing');
   if not TryStrToInt(ParamStr(ParamId), Result) then
     BadUsage('ComponentId must be integer: '+ParamStr(ParamId));
+end;
+
+//Returns multiple component ids starting with First.
+//At least one is required.
+function getComponentIds(FirstParamId: integer): TComponentIds;
+var i, tmp: integer;
+begin
+  if ParamCount<FirstParamId then BadUsage('ComponentId missing');
+  for i := FirstParamId to ParamCount do
+    if not TryStrToInt(ParamStr(i), tmp) then
+      BadUsage('ComponentId must be integer: '+ParamStr(i))
+    else begin
+      SetLength(Result, Length(Result)+1);
+      Result[Length(Result)-1] := tmp;
+    end;
 end;
 
 //Converts variant to integer, or to zero if it's null.
@@ -257,60 +277,53 @@ begin
 end;
 
 //Parses ExtendedResource list containing File Resources turning it into a File Resource List
-function parseFileResources(rs: _Recordset): TResourceList;
+procedure parseFileResources(rs: _Recordset; list: TResourceList);
 var ResourceId: OleVariant;
   Resource: TFileResource;
   ParamName: string;
 begin
-  Result := TResourceList.Create(TFileResource);
-  try
-    while not rs.EOF do begin
-      ResourceId := rs.Fields['ResourceId'].Value;
-      if VarIsClear(ResourceId) or VarIsNull(ResourceId) then begin
-        rs.MoveNext;
-        continue;
-      end;
-
-      Resource := TFileResource(Result.GetResource(ResourceId));
-      ParamName := rs.Fields['Name'].Value;
-
-      if SameText(ParamName, 'BuildOrder') then
-        Resource.BuildOrder := rs.Fields['IntegerValue'].Value
-      else
-      if SameText(ParamName, 'DstPath') then
-        Resource.DstPath := str(rs.Fields['StringValue'].Value)
-      else
-      if SameText(ParamName, 'DstName') then
-        Resource.DstName := str(rs.Fields['StringValue'].Value)
-      else
-      if SameText(ParamName, 'SrcPath') then
-        Resource.SrcPath := str(rs.Fields['StringValue'].Value)
-      else
-      if SameText(ParamName, 'SrcName') then
-        Resource.SrcName := str(rs.Fields['StringValue'].Value)
-      else
-      if SameText(ParamName, 'SrcFileCRC') then
-        Resource.SrcFileCRC := rs.Fields['IntegerValue'].Value
-      else
-      if SameText(ParamName, 'SrcFileSize') then
-        Resource.SrcFileSize := rs.Fields['IntegerValue'].Value
-      else
-      if SameText(ParamName, 'NoExpand') then
-        Resource.NoExpand := rs.Fields['BoolValue'].Value
-      else
-      if SameText(ParamName, 'Overwrite') then
-        Resource.Overwrite := rs.Fields['BoolValue'].Value;
-
+  while not rs.EOF do begin
+    ResourceId := rs.Fields['ResourceId'].Value;
+    if VarIsClear(ResourceId) or VarIsNull(ResourceId) then begin
       rs.MoveNext;
+      continue;
     end;
-  except
-    FreeAndNil(Result);
-    raise;
+
+    Resource := TFileResource(list.GetResource(ResourceId));
+    ParamName := rs.Fields['Name'].Value;
+
+    if SameText(ParamName, 'BuildOrder') then
+      Resource.BuildOrder := rs.Fields['IntegerValue'].Value
+    else
+    if SameText(ParamName, 'DstPath') then
+      Resource.DstPath := str(rs.Fields['StringValue'].Value)
+    else
+    if SameText(ParamName, 'DstName') then
+      Resource.DstName := str(rs.Fields['StringValue'].Value)
+    else
+    if SameText(ParamName, 'SrcPath') then
+      Resource.SrcPath := str(rs.Fields['StringValue'].Value)
+    else
+    if SameText(ParamName, 'SrcName') then
+      Resource.SrcName := str(rs.Fields['StringValue'].Value)
+    else
+    if SameText(ParamName, 'SrcFileCRC') then
+      Resource.SrcFileCRC := rs.Fields['IntegerValue'].Value
+    else
+    if SameText(ParamName, 'SrcFileSize') then
+      Resource.SrcFileSize := rs.Fields['IntegerValue'].Value
+    else
+    if SameText(ParamName, 'NoExpand') then
+      Resource.NoExpand := rs.Fields['BoolValue'].Value
+    else
+    if SameText(ParamName, 'Overwrite') then
+      Resource.Overwrite := rs.Fields['BoolValue'].Value;
+
+    rs.MoveNext;
   end;
 end;
 
-//Returns file resource list. Don't forget to destroy.
-function GetFileResources(ComponentId: integer): TResourceList;
+procedure AddFileResources(ComponentId: integer; list: TResourceList);
 var rs: _Recordset;
   RecordsAffected: OleVariant;
 begin
@@ -318,19 +331,54 @@ begin
     +'WHERE ResourceTypeId='+IntToStr(RESOURCETYPE_FILE)+' '
     +'AND OwnerId='+IntToStr(ComponentId)+' '
     +'ORDER BY ResourceId ', RecordsAffected, 0);
-  Result := parseFileResources(rs);
+  parseFileResources(rs, list);
+end;
+
+//Returns file resource list. Don't forget to destroy.
+function GetFileResources(ComponentId: integer): TResourceList;
+begin
+  Result := TResourceList.Create(TFileResource);
+  try
+    AddFileResources(ComponentId, Result);
+  except
+    FreeAndNil(Result);
+    raise;
+  end;
+end;
+
+function CmpFileResources(List: TResourceList; I, J: integer; Data: pointer): integer;
+var ResI, ResJ: TFileResource;
+begin
+  ResI := TFileResource(List.Items[i]);
+  ResJ := TFileResource(List.Items[j]);
+  Result := WideCompareStr(
+    ResI.DstPath + '\' + ResI.DstName,
+    ResJ.DstPath + '\' + ResJ.DstName
+  );
+end;
+
+//Sorts registry resources according to their key path, to group same key items.
+//Also moves "key only" items to the top.
+procedure SortFileResources(Resources: TResourceList);
+begin
+  Resources.Sort(CmpFileResources, nil);
 end;
 
 
 //MAIN: files <id>
-procedure FileList(ComponentId: integer);
+procedure FileList(ComponentIds: TComponentIds);
 var Resources: TResourceList;
   Res: TFileResource;
   i: integer;
   Src, Dst: WideString;
 begin
-  Resources := GetFileResources(ComponentId);
+  if Length(ComponentIds)<=0 then exit;
+  Resources := GetFileResources(ComponentIds[0]);
   try
+    for i := 1 to Length(ComponentIds) - 1 do
+      AddFileResources(ComponentIds[i], Resources);
+    SortFileResources(Resources);
+
     for i := 0 to Resources.Count - 1 do begin
       Res := TFileResource(Resources.Items[i]);
       Dst := Res.DstPath + '\' + Res.DstName;
@@ -630,61 +678,55 @@ end;
 ////////////////////////////////////////////////////////////////////////////////
 
 //Parses ExtendedResource list containing Registry Resources turning it into a Registry Resource List
-function parseRegistryResources(rs: _Recordset): TResourceList;
+procedure parseRegistryResources(rs: _Recordset; list: TResourceList);
 var ResourceId: OleVariant;
   Resource: TRegistryResource;
   ParamName: string;
 begin
-  Result := TResourceList.Create(TRegistryResource);
-  try
-    while not rs.EOF do begin
-      ResourceId := rs.Fields['ResourceId'].Value;
-      if VarIsClear(ResourceId) or VarIsNull(ResourceId) then begin
-        rs.MoveNext;
-        continue;
-      end;
-
-      Resource := TRegistryResource(Result.GetResource(ResourceId));
-      ParamName := rs.Fields['Name'].Value;
-
-      if SameText(ParamName, 'BuildOrder') then
-        Resource.BuildOrder := rs.Fields['IntegerValue'].Value
-      else
-      if SameText(ParamName, 'Description') then
-        Resource.Description := str(rs.Fields['StringValue'].Value)
-      else
-      if SameText(ParamName, 'DisplayName') then
-        Resource.DisplayName := str(rs.Fields['StringValue'].Value)
-      else
-      if SameText(ParamName, 'KeyPath') then
-        Resource.KeyPath := str(rs.Fields['StringValue'].Value)
-      else
-      if SameText(ParamName, 'ValueName') then
-        Resource.ValueName := str(rs.Fields['StringValue'].Value)
-      else
-      if SameText(ParamName, 'RegType') then
-        Resource.RegType := rs.Fields['IntegerValue'].Value
-      else
-      if SameText(ParamName, 'RegOp') then
-        Resource.RegOp := rs.Fields['IntegerValue'].Value
-      else
-      if SameText(ParamName, 'RegCond') then
-        Resource.RegCond := rs.Fields['IntegerValue'].Value
-      else
-      if SameText(ParamName, 'RegValue') then begin
-        Resource.RegValueFormat := rs.Fields['Format'].Value;
-        Resource.RegValue := readFormat(rs, Resource.RegValueFormat);
-      end;
-
+  while not rs.EOF do begin
+    ResourceId := rs.Fields['ResourceId'].Value;
+    if VarIsClear(ResourceId) or VarIsNull(ResourceId) then begin
       rs.MoveNext;
+      continue;
     end;
-  except
-    FreeAndNil(Result);
-    raise;
+
+    Resource := TRegistryResource(list.GetResource(ResourceId));
+    ParamName := rs.Fields['Name'].Value;
+
+    if SameText(ParamName, 'BuildOrder') then
+      Resource.BuildOrder := rs.Fields['IntegerValue'].Value
+    else
+    if SameText(ParamName, 'Description') then
+      Resource.Description := str(rs.Fields['StringValue'].Value)
+    else
+    if SameText(ParamName, 'DisplayName') then
+      Resource.DisplayName := str(rs.Fields['StringValue'].Value)
+    else
+    if SameText(ParamName, 'KeyPath') then
+      Resource.KeyPath := str(rs.Fields['StringValue'].Value)
+    else
+    if SameText(ParamName, 'ValueName') then
+      Resource.ValueName := str(rs.Fields['StringValue'].Value)
+    else
+    if SameText(ParamName, 'RegType') then
+      Resource.RegType := rs.Fields['IntegerValue'].Value
+    else
+    if SameText(ParamName, 'RegOp') then
+      Resource.RegOp := rs.Fields['IntegerValue'].Value
+    else
+    if SameText(ParamName, 'RegCond') then
+      Resource.RegCond := rs.Fields['IntegerValue'].Value
+    else
+    if SameText(ParamName, 'RegValue') then begin
+      Resource.RegValueFormat := rs.Fields['Format'].Value;
+      Resource.RegValue := readFormat(rs, Resource.RegValueFormat);
+    end;
+
+    rs.MoveNext;
   end;
 end;
 
-function GetRegistryResources(ComponentId: integer): TResourceList;
+procedure AddRegistryResources(ComponentId: integer; list: TResourceList);
 var rs: _Recordset;
   RecordsAffected: OleVariant;
 begin
@@ -692,40 +734,39 @@ begin
     +'ResourceTypeId='+IntToStr(RESOURCETYPE_REGISTRY)+' AND ' //registry
     +'OwnerId='+IntToStr(ComponentId)+' '
     +'ORDER BY ResourceId ', RecordsAffected, 0);
-  Result := parseRegistryResources(rs);
+  parseRegistryResources(rs, list);
 end;
 
+function GetRegistryResources(ComponentId: integer): TResourceList;
+begin
+  Result := TResourceList.Create(TRegistryResource);
+  try
+    AddRegistryResources(ComponentId, Result);
+  except
+    FreeAndNil(Result);
+    raise;
+  end;
+end;
+
+function CmpRegistryResources(List: TResourceList; I, J: integer; Data: pointer): integer;
+var ResI, ResJ: TRegistryResource;
+begin
+  ResI := TRegistryResource(List.Items[i]);
+  ResJ := TRegistryResource(List.Items[j]);
+  Result := WideCompareStr(ResI.KeyPath, ResJ.KeyPath);
+  if Result=0 then
+    if (ResI.ValueName='') and (ResJ.ValueName<>'') then
+      Result := -1
+    else
+    if (ResI.ValueName<>'') and (ResJ.ValueName='') then
+      Result := +1;
+end;
 
 //Sorts registry resources according to their key path, to group same key items.
 //Also moves "key only" items to the top.
 procedure SortRegistryResources(Resources: TResourceList);
-var i, j, cmp: integer;
-  ResI: TRegistryResource;
 begin
-  for i := 1 to Resources.Count - 1 do begin
-    ResI := TRegistryResource(Resources.Items[i]);
-
-   //Find new place
-    j := i-1;
-    while j>=0 do begin
-      cmp := WideCompareStr(ResI.KeyPath, TRegistryResource(Resources.Items[j]).KeyPath);
-      if (cmp < 0) or ((cmp=0) and (ResI.ValueName='')) then
-        Dec(j)
-      else
-        break;
-    end;
-    Inc(j);
-
-   //Move
-    if j<i then begin
-      cmp := i;
-      while cmp>j do begin
-        Resources.Items[cmp] := Resources.Items[cmp-1];
-        Dec(cmp);
-      end;
-      Resources.Items[j] := ResI;
-    end;
-  end;
+  Resources.Sort(CmpRegistryResources, nil);
 end;
 
 //Escapes registry file type string
@@ -797,7 +838,7 @@ begin
   regComment('Value "'+ValueName+'": unsupported RegType of '+IntToStr(RegType)+'.');
 end;
 
-procedure RegistryExport(ComponentId: integer);
+procedure RegistryExport(ComponentIds: TComponentIds);
 var Resources: TResourceList;
   Res: TRegistryResource;
   i: integer;
@@ -805,8 +846,11 @@ var Resources: TResourceList;
   ValueName: WideString;
   ValueStr: WideString;
 begin
-  Resources := GetRegistryResources(ComponentId);
+  if Length(ComponentIds)<=0 then exit;
+  Resources := GetRegistryResources(ComponentIds[0]);
   try
+    for i := 1 to Length(ComponentIds) - 1 do
+      AddRegistryResources(ComponentIds[i], Resources);
     SortRegistryResources(Resources);
     writeln('Windows Registry Editor Version 5.00');
     LastKey := '';
@@ -942,7 +986,7 @@ begin
       ListDependencies(getComponentId(2));
     end else
     if SameText(cmd, 'files') then begin
-      FileList(getComponentId(2));
+      FileList(getComponentIds(2));
     end else
     if SameText(cmd, 'repositories') then begin
       RepositoryList(getComponentId(2));
@@ -951,7 +995,7 @@ begin
       CollectFiles(getComponentId(2), ParamStr(3));
     end else
     if SameText(cmd, 'registry-export') then begin
-      RegistryExport(getComponentId(2));
+      RegistryExport(getComponentIds(2));
     end else
       BadUsage('Invalid command: '+cmd);
 

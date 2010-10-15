@@ -36,6 +36,9 @@ type
     RegValueFormat: integer;
   end;
 
+  TResourceList = class;
+  TResourceCmp = function(Sender: TResourceList; I, J: integer; Data: pointer): integer;
+
   TResourceList = class
   public
     ResourceClass: CResource;
@@ -44,6 +47,7 @@ type
     constructor Create(AResourceClass: CResource);
     destructor Destroy; override;
     procedure Clear;
+    procedure Sort(CmpProc: TResourceCmp; Data: pointer);
     function FindResource(ResourceId: integer): TResource;
     function GetResource(ResourceId: integer): TResource;
   end;
@@ -69,6 +73,35 @@ begin
   for i := 0 to Count - 1 do
     FreeAndNil(Items[i]);
   Count := 0;
+end;
+
+procedure TResourceList.Sort(CmpProc: TResourceCmp; Data: pointer);
+var i, j, cmp: integer;
+  ResI: TResource;
+begin
+  for i := 1 to Count - 1 do begin
+   //Find new place
+    j := i-1;
+    while j>=0 do begin
+      cmp := CmpProc(Self, I, J, Data);
+      if cmp < 0 then
+        Dec(j)
+      else
+        break;
+    end;
+    Inc(j);
+
+   //Move
+    if j<i then begin
+      ResI := Items[i];
+      cmp := i;
+      while cmp>j do begin
+        Items[cmp] := Items[cmp-1];
+        Dec(cmp);
+      end;
+      Items[j] := ResI;
+    end;
+  end;
 end;
 
 function TResourceList.FindResource(ResourceId: integer): TResource;
