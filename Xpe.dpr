@@ -745,10 +745,24 @@ end;
 const
   sHexSymbols: AnsiString = '0123456789abcdef';
 
+function BinToHex(a: PByte; len: integer): string;
+var i: integer;
+begin
+  SetLength(Result, len*3 - 1);
+  Result[1] := sHexSymbols[(a^ shr 4) + 1];
+  Result[2] := sHexSymbols[(a^ mod 16) + 1];
+
+  for i := 1 to len - 1 do begin
+    Result[i*3+0]:=',';
+    Result[i*3+1]:=sHexSymbols[(a^ shr 4) + 1];
+    Result[i*3+2]:=sHexSymbols[(a^ mod 16) + 1];
+    Inc(a);
+  end;
+end;
+
 //Prints the contents of binary array in val as registry-compatible hexadecimal string
 function regOleToHex(val: OleVariant): string;
 var a: array of byte;
-  i: integer;
 begin
   if VarIsClear(val) or VarIsNull(val) then begin
     Result := ''; //fine, supported hex value in .reg files
@@ -761,15 +775,26 @@ begin
     exit;
   end;
 
-  SetLength(Result, (Length(a)-1)*3 + 2);
-  Result[1] := sHexSymbols[(a[0] shr 4) + 1];
-  Result[2] := sHexSymbols[(a[0] mod 16) + 1];
+  Result := BinToHex(@a[0], Length(a));
+end;
 
-  for i := 1 to Length(a) - 1 do begin
-    Result[i*3+0]:=',';
-    Result[i*3+1]:=sHexSymbols[(a[i] shr 4) + 1];
-    Result[i*3+2]:=sHexSymbols[(a[i] mod 16) + 1];
-  end;
+//Prints the contents of string in val as registry-compatible hexadecimal format
+//Please DO NOT write an ANSI version of this. Registry export files should
+//contain UTF16 strings, even in binary form.
+function regStrToHex(val: WideString): string;
+begin
+  Result := BinToHex(@val[1], Length(val)*SizeOf(WideChar));
+end;
+
+procedure _BadFormat(ValueName: WideString; RegValueFormat, RegType: cardinal);
+begin
+  regComment('Value "'+ValueName+'": unsupported ValueFormat of '+IntToStr(RegValueFormat)
+     +' for RegType of '+IntToStr(RegType)+'.');
+end;
+
+procedure _BadType(ValueName: WideString; RegType: cardinal);
+begin
+  regComment('Value "'+ValueName+'": unsupported RegType of '+IntToStr(RegType)+'.');
 end;
 
 procedure RegistryExport(ComponentId: integer);
@@ -847,30 +872,37 @@ begin
 
      {These are REGISTRY types, not the internal XPE types}
       case Res.RegType of {Only these are supported:}
-        REG_SZ, REG_EXPAND_SZ, REG_MULTI_SZ:
-          if (Res.RegValueFormat=PROPFORMAT_SZ)
-          or (Res.RegValueFormat=PROPFORMAT_MULTISZ) then
+        REG_SZ:
+          if (Res.RegValueFormat=PROPFORMAT_SZ) then
             ValueStr := '"'+regEscapeStr(str(Res.RegValue))+'"'
           else begin
-            regComment('Value "'+ValueName+'": unsupported ValueFormat of '+IntToStr(Res.RegValueFormat)
-              +' for RegType of '+IntToStr(Res.RegType)+'.');
+            _BadFormat(ValueName, Res.RegValueFormat, Res.RegType);
             continue; //unsupported
           end;
+        REG_EXPAND_SZ, REG_MULTI_SZ:
+        begin
+         {Always exported as binary, probably to denote type ID}
+          if (Res.RegValueFormat=PROPFORMAT_SZ)
+          or (Res.RegValueFormat=PROPFORMAT_MULTISZ) then
+            ValueStr := 'hex('+IntToStr(Res.RegType)+'):' + regStrToHex(Res.RegValue)
+          else begin
+            _BadFormat(ValueName, Res.RegValueFormat, Res.RegType);
+            continue; //unsupported
+          end;
+        end;
         REG_BINARY: begin
-          regComment('Value "'+ValueName+'": unsupported ValueFormat of '+IntToStr(Res.RegValueFormat)
-            +' for RegType of '+IntToStr(Res.RegType)+'.');
+          _BadFormat(ValueName, Res.RegValueFormat, Res.RegType);
           continue; //PROPFORMAT_BINARY solved earlier, rest is unsupported
         end;
         REG_DWORD:
           if Res.RegValueFormat=PROPFORMAT_INTEGER then
             ValueStr := 'dword:'+IntToHex(int(Res.RegValue), 8)
           else begin
-            regComment('Value "'+ValueName+'": unsupported ValueFormat of '+IntToStr(Res.RegValueFormat)
-              +' for RegType of '+IntToStr(Res.RegType)+'.');
+            _BadFormat(ValueName, Res.RegValueFormat, Res.RegType);
             continue; //unsupported
           end;
       else
-        regComment('Value "'+ValueName+'": unsupported RegType of '+IntToStr(Res.RegType)+'.');
+        _BadType(ValueName, Res.RegType);
         continue;
       end;
 
