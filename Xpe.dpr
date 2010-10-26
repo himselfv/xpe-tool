@@ -676,6 +676,7 @@ end;
 
 
 ////////////////////////////////////////////////////////////////////////////////
+///  Registry
 
 //Parses ExtendedResource list containing Registry Resources turning it into a Registry Resource List
 procedure parseRegistryResources(rs: _Recordset; list: TResourceList);
@@ -794,10 +795,10 @@ begin
   Result[2] := sHexSymbols[(a^ mod 16) + 1];
 
   for i := 1 to len - 1 do begin
+    Inc(a);
     Result[i*3+0]:=',';
     Result[i*3+1]:=sHexSymbols[(a^ shr 4) + 1];
     Result[i*3+2]:=sHexSymbols[(a^ mod 16) + 1];
-    Inc(a);
   end;
 end;
 
@@ -958,7 +959,7 @@ begin
   end;
 end;
 
-
+////////////////////////////////////////////////////////////////////////////////
 
 var
   cmd: string;
